@@ -43,7 +43,7 @@ def passot_pouquet_velocity(Nx, Ny, k_peak, urms_target, seed=1):
     ky = 2*np.pi*np.fft.fftfreq(Ny, d=1.0)
     KX, KY = np.meshgrid(kx, ky)
     K = np.sqrt(KX**2 + KY**2)
-    K[0,0] = 1.0  # avoid divide-by-zero for shaping; we'll zero it later
+    K[0,0] = 1.0  # avoid divide-by-zero for shaping
 
     # PP spectral shape (unnormalized)
     E = (K / k_peak)**4 * np.exp(-2.0*(K / k_peak)**2)
@@ -52,7 +52,7 @@ def passot_pouquet_velocity(Nx, Ny, k_peak, urms_target, seed=1):
     phase1 = rng.normal(size=(Ny, Nx)) + 1j*rng.normal(size=(Ny, Nx)) #complex gaussian random field
     phase2 = rng.normal(size=(Ny, Nx)) + 1j*rng.normal(size=(Ny, Nx))
 
-    # amplitude ∝ sqrt(E). (Factor choices only affect scaling; we'll normalize to urms_target)
+    # amplitude ∝ sqrt(E). (Factor choices only affect scaling; we normalize to urms_target)
     amp = np.sqrt(E)
     ux_hat = amp * phase1
     uy_hat = amp * phase2
@@ -102,7 +102,7 @@ def shell_avg_spectrum(ux, uy, dx=1.0, dy=1.0, nbins=None):
     uyh = np.fft.fft2(uy)
 
     # kinetic energy density in Fourier space
-    Ek2d = 0.5*(np.abs(uxh)**2 + np.abs(uyh)**2)/(Nx*Ny)  # Parseval normalization
+    Ek2d = 0.5*(np.abs(uxh)**2 + np.abs(uyh)**2)/(Nx*Ny)**2  # Parseval normalization
 
     # Build the 2D wavenumber grid
     kx = 2*np.pi*np.fft.fftfreq(Nx, d=dx)
@@ -130,12 +130,12 @@ def main():
     # --------------------
     # Simulation parameters
     # --------------------
-    Nx, Ny = 256, 256
+    Nx, Ny = 256, 256         # grid size, number of lattice nodes in each direction, best 512
     Nt = 4000                 # number of time steps
-    tau = 0.7                 # relaxation time (viscosity via nu = cs^2*(tau-1/2))
+    tau = 0.53                # relaxation time (viscosity via nu = cs^2*(tau-1/2))
     rho0 = 1.0
     urms0 = 0.05              # initial rms velocity (keep low Mach: u << cs ~ 1/sqrt(3))
-    k_peak = 8.0 * 2*np.pi/Nx # peak wavenumber ~ 8 grid modes (adjust as you like)
+    k_peak = 4 * 2*np.pi/Nx  # peak wavenumber 
     plot_every = 200
 
     cxs, cys, w = d2q9_setup()
@@ -152,6 +152,12 @@ def main():
     # prepare plotting
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10,4))
     plt.tight_layout()
+
+     # Energy history arrays
+    K_hist, t_hist = [], []
+    # save initial energy
+    urms_init = np.sqrt(np.mean(ux0**2 + uy0**2))
+    K0 = 0.5 * urms_init**2
 
     # time loop
     for it in range(Nt):
@@ -173,22 +179,34 @@ def main():
         Feq = feq_D2Q9(rho, ux, uy, cxs, cys, w)
         F += -(1.0/tau) * (F - Feq)
 
+        # --- Kinetic energy (store every step) ---
+        urms = np.sqrt(np.mean(ux**2 + uy**2))
+        K = 0.5 * urms**2
+        K_hist.append(K)
+        t_hist.append(it)
+
+
         # --- Diagnostics/plots ---
         if it % plot_every == 0 or it == Nt-1:
             # energy spectrum
             k_shell, E_shell = shell_avg_spectrum(ux, uy, nbins=80)
 
+            K_from_spectrum = np.sum(E_shell)        #Energy from spectrum (sum over all shells)  
+            K_from_field = K      #Energy from real space (RMS velocity)
+            print(f"t={it:5d} | K_spectrum={K_from_spectrum:.6e} | K_field={K_from_field:.6e} | rel.err={(K_from_spectrum-K_from_field)/K_from_field:.2e}")
+
+
             ax1.clear()
             vorticity = (np.roll(uy, -1, axis=1) - np.roll(uy, 1, axis=1)  # dUy/dx
                         - (np.roll(ux, -1, axis=0) - np.roll(ux, 1, axis=0))) # dUx/dy
             im = ax1.imshow(vorticity, cmap='bwr', origin='lower')
-            ax1.set_title(f'Vorticity, t={it}')
-            ax1.set_xticks([]); ax1.set_yticks([])
+            ax1.set_title(f'Vorticity, t={it}')          #Red areas: positive vorticity → fluid rotating counterclockwise
+            ax1.set_xticks([]); ax1.set_yticks([])       #Blue areas: negative vorticity → fluid rotating clockwise
+            ax2.clear()                                  #White: near zero vorticity → almost irrotational
 
-            ax2.clear()
             # Avoid zero bin; plot where k>0 and E>0
-            m = (k_shell > 0) & (E_shell > 0)
-            ax2.loglog(k_shell[m], E_shell[m], linestyle='-')
+            msk = (k_shell > 0) & (E_shell > 0)
+            ax2.loglog(k_shell[msk], E_shell[msk], linestyle='-')
             ax2.set_xlabel('k')
             ax2.set_ylabel('E(k)')
             ax2.set_title('1D energy spectrum')
@@ -202,6 +220,15 @@ def main():
 
             plt.pause(0.001)
 
+    plt.show(block=False)
+
+    # ----- Plot kinetic energy decay -----
+    plt.figure(figsize=(6,4))
+    plt.plot(t_hist, K_hist, lw=2)
+    plt.xlabel("Time step")
+    plt.ylabel("Turbulent kinetic energy K(t)")
+    plt.title("Turbulent energy decay")
+    plt.grid(True, alpha=0.3)
     plt.show()
 
 if __name__ == "__main__":

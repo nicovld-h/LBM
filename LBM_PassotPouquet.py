@@ -159,11 +159,15 @@ def main():
     urms_init = np.sqrt(np.mean(ux0**2 + uy0**2))
     K0 = 0.5 * urms_init**2
 
-    # time loop
+    # for time-averaged spectrum
+    E_accum = None 
+    count = 0
+    start_average = 1000 
+
+    #------------------------- time loop -------------------------------
     for it in range(Nt):
 
         # --- Streaming (periodic via roll) ---
-        # note: this is "pull" or "push" equivalent; here we "push" by rolling each direction
         for i, (cx, cy) in enumerate(zip(cxs, cys)):
             if cx != 0:
                 F[:, :, i] = np.roll(F[:, :, i], cx, axis=1) # if the velocity for this direction is (1,0), then all the particles moving east are rolled one cell to the right and so on
@@ -179,7 +183,15 @@ def main():
         Feq = feq_D2Q9(rho, ux, uy, cxs, cys, w)
         F += -(1.0/tau) * (F - Feq)
 
-        # --- Kinetic energy (store every step) ---
+        #--- Time averaging of spectrum ---
+        if it % plot_every == 0 and it >= start_average:
+            k_shell, E_shell = shell_avg_spectrum(ux, uy, nbins=80)
+            if E_accum is None:
+                E_accum = np.zeros_like(E_shell)
+            E_accum += E_shell
+            count += 1
+
+        # --- Kinetic energy ---
         urms = np.sqrt(np.mean(ux**2 + uy**2))
         K = 0.5 * urms**2
         K_hist.append(K)
@@ -192,7 +204,7 @@ def main():
             k_shell, E_shell = shell_avg_spectrum(ux, uy, nbins=80)
 
             K_from_spectrum = np.sum(E_shell)        #Energy from spectrum (sum over all shells)  
-            K_from_field = K      #Energy from real space (RMS velocity)
+            K_from_field = K                         #Energy from real space (RMS velocity)
             print(f"t={it:5d} | K_spectrum={K_from_spectrum:.6e} | K_field={K_from_field:.6e} | rel.err={(K_from_spectrum-K_from_field)/K_from_field:.2e}")
 
 
@@ -229,7 +241,61 @@ def main():
     plt.ylabel("Turbulent kinetic energy K(t)")
     plt.title("Turbulent energy decay")
     plt.grid(True, alpha=0.3)
-    plt.show()
+    plt.show(block=False)
+
+    #--------------------Validation with experimanetal data---------------------
+    # Load file
+    data = np.loadtxt("spectrum.txt", skiprows=2)
+
+    # Separate into columns
+    k_exp = data[:, 0]
+    E_exp = data[:, 1]
+
+    if count > 0:
+        E_timeavg = E_accum / count
+
+        # Rescale time-averaged spectrum
+        L2D = 2*np.pi / k_peak
+        urms = np.sqrt(np.mean(ux**2 + uy**2))
+        uprime_2D = urms / np.sqrt(2.0)
+
+        mask = (k_shell > 0) & (E_timeavg > 0)
+        kstar_2D = k_shell[mask] * L2D
+        Estar_2D = E_timeavg[mask] / (uprime_2D**2 * L2D)
+
+        # Rescale experimental data
+        K3D = 0.695
+        L_exp = 1.376
+        uprime_exp = np.sqrt(2*K3D/3.0)
+
+        kstar_exp = k_exp * L_exp
+        Estar_exp = E_exp / (uprime_exp**2 * L_exp)
+
+        # --- Plot overlay ---
+        plt.figure(figsize=(7,5))
+        plt.loglog(kstar_exp, Estar_exp, 'k-',  lw=2, label='Experiment (3D) non-dimesionalized')
+        plt.loglog(kstar_2D,  Estar_2D,  'r-', lw=2, label='LBM (2D) non-dimesionalized')
+        # Pick anchors in the inertial range region (where both curves are visible)
+        k_ref = 10 
+        # Nearest actual data points for vertical alignment
+        E_ref_3D = Estar_exp[np.argmin(np.abs(kstar_exp - k_ref))]
+        E_ref_2D = Estar_2D[np.argmin(np.abs(kstar_2D - k_ref))]
+        # Reference lines spanning one decade around k_ref
+        kline = np.array([k_ref/2, k_ref*2])
+        Eline_3D = E_ref_3D * (kline/k_ref)**(-5/3)
+        Eline_2D = E_ref_2D * (kline/k_ref)**(-3)
+
+        # Plot them
+        plt.loglog(kline, Eline_3D, 'k:', lw=4, label=r'$k^{-5/3}$')
+        plt.loglog(kline, Eline_2D, 'r:', lw=4, label=r'$k^{-3}$')
+        plt.xlabel(r'$k\,L$')
+        plt.ylabel(r'$E(k)/(u^{\prime 2} L)$')
+        plt.title('3D experiment vs 2D LBM')
+        plt.legend()
+        plt.grid(True, which='both', alpha=0.3)
+        plt.show()
+
 
 if __name__ == "__main__":
     main()
+

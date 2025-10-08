@@ -37,10 +37,10 @@ def feq_D2Q9(rho, ux, uy, cxs, cys, w):
       2) Project to solenoidal (divergence-free): P = I - kk^T/k^2
       3) IFFT to physical space, then scale to desired u_rms
     """
-def passot_pouquet_velocity(Nx, Ny, k_peak, urms_target, seed=1):
+def passot_pouquet_velocity(Nx, Ny, k_peak, urms_target, dx=1.0, dy=1.0, seed=1):
     rng = np.random.default_rng(seed) #creating a reproducible random number generator
-    kx = 2*np.pi*np.fft.fftfreq(Nx, d=1.0) #Nx=Ny=256 or 512
-    ky = 2*np.pi*np.fft.fftfreq(Ny, d=1.0)
+    kx = 2*np.pi*np.fft.fftfreq(Nx, d=dx) #Nx=Ny=256 or 512
+    ky = 2*np.pi*np.fft.fftfreq(Ny, d=dy)
     KX, KY = np.meshgrid(kx, ky)
     K = np.sqrt(KX**2 + KY**2)
     K[0,0] = 1.0  # avoid divide-by-zero for shaping
@@ -132,15 +132,22 @@ def main():
     # Simulation parameters
     # --------------------
     Nx, Ny = 512, 512         # grid size, number of lattice nodes in each direction, best 512
+    L_box = 2*np.pi           # choose a fixed physical box (common choice)
+    dx = L_box / Nx
+    dy = L_box / Ny
+    m = 8                     # best 8
+    k_peak = m * 2*np.pi / L_box 
     Nt = 4000                 # number of time steps
-    tau = 0.53                # relaxation time (viscosity via nu = cs^2*(tau-1/2))
+    tau = 0.53                # relaxation time (viscosity via nu = cs^2*(tau-1/2)), best 0.53
     rho0 = 1.0
     urms0 = 0.05              # initial rms velocity (keep low Mach: u << cs ~ 1/sqrt(3))
-    k_peak = 8 * 2*np.pi/Nx   # peak wavenumber best m=8
     plot_every = 200
+    SAMPLE_TIMES = [1000, 2000, 3000]  # To compare across runs for error
 
     # normalization length so x-axis is kL
     L2D = 2*np.pi / k_peak  
+    k_nyq = np.pi / dx              # physical Nyquist wavenumber
+    kL_nyq = k_nyq * L2D            # dimensionless Nyquist for the plot
 
     #convert to dimensionless units
     def to_dimensionless(k_shell, E_shell, ux, uy, L2D): 
@@ -155,7 +162,7 @@ def main():
     # --------------------
     # Passot–Pouquet initial velocity field (periodic)
     # --------------------
-    ux0, uy0 = passot_pouquet_velocity(Nx, Ny, k_peak=k_peak, urms_target=urms0, seed=4)
+    ux0, uy0 = passot_pouquet_velocity(Nx, Ny, k_peak=k_peak, urms_target=urms0, dx=dx, dy=dy, seed=4)
 
     # initialize distributions with Feq(rho0, u0)
     rho = rho0 * np.ones((Ny, Nx))
@@ -196,12 +203,23 @@ def main():
     zoom_line_added = False
 
     # inertial-range zoom bounds
-    kL_peak = k_peak * L2D           # = 2*pi
-    kL_nyq  = np.pi * L2D
+    kL_peak = k_peak * L2D                  # = 2*pi
     zoom_x_lo = max(0.9 * kL_peak, 1.0)     # start past injection
     zoom_x_hi = min(0.1 * kL_nyq, 1000.0)   # stop before dissipation/Nyquist
-    ZOOM_YLIMS = (1e-10, 1e-1)              # fixed y-limits
+    ZOOM_YLIMS = (1e-10, 1e2)              # fixed y-limits
     ax_zoom.set_ylim(*ZOOM_YLIMS)           
+
+    # For storage for error
+    results = {
+    'Nx': Nx, 'Ny': Ny, 'tau': tau, 'k_peak': k_peak, 'L2D': L2D,
+    'spec_t': [],        # times when we store spectra
+    'spec_kL': [],       # list of arrays
+    'spec_E': [],        # list of arrays (E/(u'^2 L))
+    'K_t': [],           # full time history
+    'K': [],             
+    'Omega_t': [],       # enstrophy times (match SAMPLE_TIMES)
+    'Omega': [],         # enstrophy values at those times
+}
 
     #------------------------- time loop -------------------------------
     for it in range(Nt):
@@ -224,7 +242,7 @@ def main():
 
         #--- Time averaging of spectrum ---
         if it % plot_every == 0 and it >= start_average:
-            k_shell, E_shell = shell_avg_spectrum(ux, uy, nbins=80)
+            k_shell, E_shell = shell_avg_spectrum(ux, uy, dx=dx, dy=dy ,nbins=80)
             if E_accum is None:
                 E_accum = np.zeros_like(E_shell)
             E_accum += E_shell
@@ -236,17 +254,21 @@ def main():
         K_hist.append(K)
         t_hist.append(it)
 
+        # mirror the history into the results bundle
+        results['K_t'] = t_hist[:]  
+        results['K']   = K_hist[:]
+
         # --- Diagnostics/plots ---
         if it % (5*plot_every) == 0 or it == Nt-1:
-            k_shell, E_shell = shell_avg_spectrum(ux, uy, nbins=80)
+            k_shell, E_shell = shell_avg_spectrum(ux, uy,dx=dx, dy=dy, nbins=80)
             K_from_spectrum = np.sum(E_shell)
             K_from_field = K
             print(f"t={it:5d} | K_spectrum={K_from_spectrum:.6e} | K_field={K_from_field:.6e} | rel.err={(K_from_spectrum-K_from_field)/K_from_field:.2e}")
 
             # --- Vorticity field ---
             ax1.clear()
-            vorticity = 0.5* (np.roll(uy, -1, axis=1) - np.roll(uy, 1, axis=1) # 2-point centered difference
-                        - (np.roll(ux, -1, axis=0) - np.roll(ux, 1, axis=0)))
+            vorticity = (1/(2*dx)*(np.roll(uy, -1, axis=1) - np.roll(uy, 1, axis=1)) # 2-point centered difference
+                         - (1/(2*dy)*(np.roll(ux, -1, axis=0) - np.roll(ux, 1, axis=0))))
             im = ax1.imshow(vorticity, cmap='bwr', origin='lower')
             ax1.set_title(f'Vorticity, t={it}')
             ax1.set_xticks([]); ax1.set_yticks([])
@@ -262,6 +284,18 @@ def main():
             if np.any(msk):
                 kL, E_dim = to_dimensionless(k_shell[msk], E_shell[msk], ux, uy, L2D)
 
+            # --- store spectra & enstrophy at selected times for convergence study ---
+            if it in SAMPLE_TIMES and np.any(msk):
+                # store spectrum
+                results['spec_t'].append(it)
+                results['spec_kL'].append(kL.copy())
+                results['spec_E'].append(E_dim.copy())
+                # enstrophy Ω = 1/2 <ω^2> 
+                omega = vorticity  
+                Omega = 0.5 * float(np.mean(omega**2))
+                results['Omega_t'].append(it)
+                results['Omega'].append(Omega)
+
             # right panel of fig1, instantaneous spectrum
             ax2.clear()
             ax2.loglog(kL, E_dim, linestyle='-', lw=1.5)
@@ -269,7 +303,7 @@ def main():
             ax2.set_ylabel(r'$E(k)/(u^{\prime 2}L)$')
             ax2.set_title(f'Energy spectrum, t={it}')
             ax2.axvline(k_peak*L2D, color='r', linestyle='--', label=r'$k_pL$')
-            ax2.axvline(np.pi*L2D,    ls=':', color='black', alpha=0.5, label='Nyquist')
+            ax2.axvline(kL_nyq,    ls=':', color='black', alpha=0.5, label='Nyquist')
             ax2.legend(loc="best")
             ax2.set_xlim(1, min(1000, float(kL.max())*1.05))
 
@@ -323,6 +357,11 @@ def main():
     plt.title("Turbulent energy decay")
     plt.grid(True, alpha=0.3)
     plt.show()
+
+    # ----- Saving for error -----
+    np.savez_compressed(f'lbm_run_N{Nx}.npz', **results)
+    print(f"Saved convergence data to lbm_run_N{Nx}.npz")
+
 
 if __name__ == "__main__":
     main()

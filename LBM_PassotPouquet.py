@@ -131,7 +131,7 @@ def main():
     # --------------------
     # Simulation parameters
     # --------------------
-    Nx, Ny = 512, 512         # grid size, number of lattice nodes in each direction, best 512
+    Nx, Ny = 128, 128         # grid size, number of lattice nodes in each direction, best 512
     L_box = 2*np.pi           # choose a fixed physical box (common choice)
     dx = L_box / Nx
     dy = L_box / Ny
@@ -143,6 +143,8 @@ def main():
     urms0 = 0.05              # initial rms velocity (keep low Mach: u << cs ~ 1/sqrt(3))
     plot_every = 200
     SAMPLE_TIMES = [1000, 2000, 3000]  # To compare across runs for error
+    K_YMIN_FIXED = 0.0        #y-axis range for kinetic energy spectrum
+    K_YMAX_FIXED = 0.0013
 
     # normalization length so x-axis is kL
     L2D = 2*np.pi / k_peak  
@@ -163,6 +165,13 @@ def main():
     # Passot–Pouquet initial velocity field (periodic)
     # --------------------
     ux0, uy0 = passot_pouquet_velocity(Nx, Ny, k_peak=k_peak, urms_target=urms0, dx=dx, dy=dy, seed=4)
+
+    # Fixed vorticity color scale from t=0 (used for all frames)
+    vorticity0 = ((np.roll(uy0, -1, axis=1) - np.roll(uy0,  1, axis=1)) / (2.0*dx)
+                - (np.roll(ux0, -1, axis=0) - np.roll(ux0,  1, axis=0)) / (2.0*dy))
+    omega_rms0 = float(np.sqrt(np.mean(vorticity0**2)))
+    omega_clim = 3.0 * omega_rms0          # 3σ symmetric range
+    omega_vmin, omega_vmax = -omega_clim, +omega_clim # (alternative: omega_clim = 1.05 * np.max(np.abs(vorticity0)))
 
     # initialize distributions with Feq(rho0, u0)
     rho = rho0 * np.ones((Ny, Nx))
@@ -269,7 +278,7 @@ def main():
             ax1.clear()
             vorticity = (1/(2*dx)*(np.roll(uy, -1, axis=1) - np.roll(uy, 1, axis=1)) # 2-point centered difference
                          - (1/(2*dy)*(np.roll(ux, -1, axis=0) - np.roll(ux, 1, axis=0))))
-            im = ax1.imshow(vorticity, cmap='bwr', origin='lower')
+            im = ax1.imshow(vorticity, cmap='bwr', origin='lower', vmin=omega_vmin, vmax=omega_vmax)
             ax1.set_title(f'Vorticity, t={it}')
             ax1.set_xticks([]); ax1.set_yticks([])
             # add/update colorbar
@@ -355,6 +364,7 @@ def main():
     plt.xlabel("Time step")
     plt.ylabel("Turbulent kinetic energy K(t)")
     plt.title("Turbulent energy decay")
+    plt.ylim(K_YMIN_FIXED, K_YMAX_FIXED)  
     plt.grid(True, alpha=0.3)
     plt.show()
 

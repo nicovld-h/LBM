@@ -7,12 +7,12 @@ runs = [np.load(f, allow_pickle=True) for f in files]
 
 def band_energy(K, kL, E_dim, x_max):
     m = kL <= x_max
-    frac = np.trapz(E_dim[m], kL[m])          # ∫ E_dim d(kL)
+    frac = np.trapezoid(E_dim[m], kL[m])          # ∫ E_dim d(kL)
     return K * frac                           # band-limited energy
 
 def band_enstrophy(K, kL, E_dim, L2D, x_max):
     m = kL <= x_max
-    integral = np.trapz((kL[m]**2) * E_dim[m], kL[m])  # ∫ (kL)^2 E_dim d(kL)
+    integral = np.trapezoid((kL[m]**2) * E_dim[m], kL[m])  # ∫ (kL)^2 E_dim d(kL)
     return (K / (L2D**2)) * integral                   # Ω = (K/L^2) ∫ (kL)^2 E_dim d(kL)
 
 # choose reference = highest N
@@ -22,7 +22,7 @@ ref = runs[ref_idx]
 N_ref = int(ref['Nx'])
 print("Reference resolution:", N_ref)
 
-# utility: interpolate ref spectrum onto coarse kL grid (only within overlap)
+#interpolate ref spectrum onto coarse kL grid (only within overlap)
 def spectrum_L2_rel_err(kL_c, E_c, kL_ref, E_ref):
     kmin = max(kL_c.min(), kL_ref.min())
     kmax = min(kL_c.max(), kL_ref.max())
@@ -87,17 +87,17 @@ for r in runs:
         Kc  = float(np.interp(t, t_r,  K_r))
         Kr  = float(np.interp(t, t_ref, K_R))
 
-        # band-limited energy (uses ∫ E_dim d(kL) fraction; in 2D u'^2 = K)
+        # band-limited energy (uses ∫ E_dim d(kL) fraction)
         m_c   = kL_c  <= x_max
         m_ref = kL_ref <= x_max
-        frac_c   = float(np.trapz(E_c[m_c],           kL_c[m_c]))
-        frac_ref = float(np.trapz(E_r[m_ref],         kL_ref[m_ref]))
+        frac_c   = float(np.trapezoid(E_c[m_c], kL_c[m_c]))
+        frac_ref = float(np.trapezoid(E_r[m_ref], kL_ref[m_ref]))
         Kc_band  = Kc * frac_c
         Kr_band  = Kr * frac_ref
 
         # band-limited enstrophy: Ω = (K/L^2) ∫ (kL)^2 E_dim d(kL)
-        int_c   = float(np.trapz((kL_c[m_c]**2)  * E_c[m_c],   kL_c[m_c]))
-        int_ref = float(np.trapz((kL_ref[m_ref]**2) * E_r[m_ref], kL_ref[m_ref]))
+        int_c   = float(np.trapezoid((kL_c[m_c]**2)  * E_c[m_c],   kL_c[m_c]))
+        int_ref = float(np.trapezoid((kL_ref[m_ref]**2) * E_r[m_ref], kL_ref[m_ref]))
         Oc_band = (Kc / (L2D_run**2)) * int_c
         Or_band = (Kr / (L2D_ref**2)) * int_ref
 

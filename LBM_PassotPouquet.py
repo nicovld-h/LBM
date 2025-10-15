@@ -1,6 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Global font sizes 
+plt.rcParams.update({
+    "axes.titlesize": 18,   # subplot titles
+    "axes.labelsize": 16,   # x/y labels
+    "legend.fontsize": 14,  # legend text
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "figure.titlesize": 20  # suptitle
+})
+
 # ------------------------------
 # D2Q9 LBM + Passot–Pouquet ICs
 # ------------------------------
@@ -131,19 +141,19 @@ def main():
     # --------------------
     # Simulation parameters
     # --------------------
-    Nx, Ny = 128, 128         # grid size, number of lattice nodes in each direction, best 512
-    L_box = 2*np.pi           # choose a fixed physical box (common choice)
+    Nx, Ny = 128, 128               # grid size, number of lattice nodes in each direction, best 512
+    L_box = 2*np.pi                 # choose a fixed physical box (common choice)
     dx = L_box / Nx
     dy = L_box / Ny
-    m = 8                     # best 8
+    m = 8                           # best 8
     k_peak = m * 2*np.pi / L_box 
-    Nt = 4000                 # number of time steps
-    tau = 0.53                # relaxation time (viscosity via nu = cs^2*(tau-1/2)), best 0.53
+    Nt = 4000                       # number of time steps
     rho0 = 1.0
-    urms0 = 0.05              # initial rms velocity (keep low Mach: u << cs ~ 1/sqrt(3))
+    urms0 = 0.05                    # initial rms velocity (keep low Mach: u << cs ~ 1/sqrt(3))
+    tau = 0.5+ 3*urms0*Nx/(320*m)   # relaxation time Re=320, cs2=1/3, best 0.53
     plot_every = 200
     SAMPLE_TIMES = [1000, 2000, 3000]  # To compare across runs for error
-    K_YMIN_FIXED = 0.0        #y-axis range for kinetic energy spectrum
+    K_YMIN_FIXED = 0.0              #y-axis range for kinetic energy spectrum
     K_YMAX_FIXED = 0.0013
 
     # normalization length so x-axis is kL
@@ -171,7 +181,7 @@ def main():
                 - (np.roll(ux0, -1, axis=0) - np.roll(ux0,  1, axis=0)) / (2.0*dy))
     omega_rms0 = float(np.sqrt(np.mean(vorticity0**2)))
     omega_clim = 3.0 * omega_rms0          # 3σ symmetric range
-    omega_vmin, omega_vmax = -omega_clim, +omega_clim # (alternative: omega_clim = 1.05 * np.max(np.abs(vorticity0)))
+    omega_vmin, omega_vmax = -omega_clim, +omega_clim 
 
     # initialize distributions with Feq(rho0, u0)
     rho = rho0 * np.ones((Ny, Nx))
@@ -199,7 +209,7 @@ def main():
     ax_spec.set_yscale('log')
     ax_spec.set_xlabel(r'$kL$')
     ax_spec.set_ylabel(r'$E(k)/(u^{\prime 2}L)$')
-    ax_spec.set_title('Energy spectra at different t')
+    ax_spec.set_title('Energy spectra at different time steps')
     ax_spec.grid(True, which='both', alpha=0.3)
     xlim_set = False
 
@@ -215,16 +225,16 @@ def main():
     kL_peak = k_peak * L2D                  # = 2*pi
     zoom_x_lo = max(0.9 * kL_peak, 1.0)     # start past injection
     zoom_x_hi = min(0.1 * kL_nyq, 1000.0)   # stop before dissipation/Nyquist
-    ZOOM_YLIMS = (1e-10, 1e2)              # fixed y-limits
+    ZOOM_YLIMS = (1e-10, 1e2)               # fixed y-limits
     ax_zoom.set_ylim(*ZOOM_YLIMS)           
 
-    # For storage for error
+    # ----------- For storage for error -----------
     results = {
     'Nx': Nx, 'Ny': Ny, 'tau': tau, 'k_peak': k_peak, 'L2D': L2D,
     'spec_t': [],        # times when we store spectra
     'spec_kL': [],       # list of arrays
     'spec_E': [],        # list of arrays (E/(u'^2 L))
-    'K_t': [],           # full time history
+    'K_t': [],           # kinetic energy full time history
     'K': [],             
     'Omega_t': [],       # enstrophy times (match SAMPLE_TIMES)
     'Omega': [],         # enstrophy values at those times
@@ -241,12 +251,12 @@ def main():
                 F[:, :, i] = np.roll(F[:, :, i], cy, axis=0) # “Roll around” means that when populations stream beyond one edge of the grid, they re-enter from the opposite edge = periodic BC
 
         # --- Macros ---
-        rho = np.sum(F, axis=2)
-        ux  = np.sum(F * cxs[np.newaxis, np.newaxis, :], axis=2) / rho
+        rho = np.sum(F, axis=2) # density
+        ux  = np.sum(F * cxs[np.newaxis, np.newaxis, :], axis=2) / rho # velocity
         uy  = np.sum(F * cys[np.newaxis, np.newaxis, :], axis=2) / rho
 
         # --- Collision (BGK) ---
-        Feq = feq_D2Q9(rho, ux, uy, cxs, cys, w)
+        Feq = feq_D2Q9(rho, ux, uy, cxs, cys, w) # equilibrium
         F += -(1.0/tau) * (F - Feq)
 
         #--- Time averaging of spectrum ---
@@ -263,7 +273,7 @@ def main():
         K_hist.append(K)
         t_hist.append(it)
 
-        # mirror the history into the results bundle
+        # mirror the history into the results 
         results['K_t'] = t_hist[:]  
         results['K']   = K_hist[:]
 
@@ -279,12 +289,12 @@ def main():
             vorticity = (1/(2*dx)*(np.roll(uy, -1, axis=1) - np.roll(uy, 1, axis=1)) # 2-point centered difference
                          - (1/(2*dy)*(np.roll(ux, -1, axis=0) - np.roll(ux, 1, axis=0))))
             im = ax1.imshow(vorticity, cmap='bwr', origin='lower', vmin=omega_vmin, vmax=omega_vmax)
-            ax1.set_title(f'Vorticity, t={it}')
+            ax1.set_title(f'Vorticity, n={it}')
             ax1.set_xticks([]); ax1.set_yticks([])
             # add/update colorbar
             if cbar is None:
                 cbar = fig.colorbar(im, ax=ax1, fraction=0.046, pad=0.08, location='left')
-                cbar.set_label(r'Vorticity')
+                cbar.set_label(r'Vorticity', fontsize=14)
             else:
                 cbar.update_normal(im)
 
@@ -293,7 +303,7 @@ def main():
             if np.any(msk):
                 kL, E_dim = to_dimensionless(k_shell[msk], E_shell[msk], ux, uy, L2D)
 
-            # --- store spectra & enstrophy at selected times for convergence study ---
+            # --- store spectra & enstrophy at selected times for error ---
             if it in SAMPLE_TIMES and np.any(msk):
                 # store spectrum
                 results['spec_t'].append(it)
@@ -313,12 +323,11 @@ def main():
             ax2.set_title(f'Energy spectrum, t={it}')
             ax2.axvline(k_peak*L2D, color='r', linestyle='--', label=r'$k_pL$')
             ax2.axvline(kL_nyq,    ls=':', color='black', alpha=0.5, label='Nyquist')
-            ax2.legend(loc="best")
+            ax2.legend(loc="best", fontsize=14)
             ax2.set_xlim(1, min(1000, float(kL.max())*1.05))
 
-            # persistent multi-time spectra figure2 (dimensionless)
+            # multi-time spectra figure2 (dimensionless)
             ax_spec.plot(kL, E_dim, label=f't={it}', lw=1)
-
             # set limits and add k^-3
             if not xlim_set:
                 ax_spec.set_xlim(1, min(1000, float(kL.max())*1.05))
@@ -333,7 +342,7 @@ def main():
                 ax_spec.plot(k_line, E_line, 'k--', lw=2, label=r'$k^{-3}$')
                 xlim_set = True
 
-            ax_spec.legend(loc='lower left', fontsize=8)
+            ax_spec.legend(loc='lower left', fontsize=14)
 
             # zoomed figure update
             ax_zoom.plot(kL, E_dim, lw=1, label=f't={it}')
@@ -353,7 +362,7 @@ def main():
                 ax_zoom.plot(k_line_z, E_line_z, 'k--', lw=2, label=r'$k^{-3}$')
                 zoom_line_added = True
 
-            ax_zoom.legend(loc='lower left', fontsize=8)
+            ax_zoom.legend(loc='lower left', fontsize=14)
         plt.pause(0.001)
 
     plt.show(block=False)

@@ -40,62 +40,90 @@ def feq_D2Q9(rho, ux, uy, cxs, cys, w):
     return Feq
 
     """
-    Build a periodic 2D velocity field with PassotPouquet spectrum:
-      E(k) ∝ (k/kp)^4 * exp[-2*(k/kp)^2]
-    Steps:
-      1) Create random complex field in Fourier space with amplitude ∝ sqrt(E(k))
-      2) Project to solenoidal (divergence-free): P = I - kk^T/k^2
-      3) IFFT to physical space, then scale to desired u_rms
+    Build a periodic 2D velocity field with Passot Pouquet spectrum
+    E(k) ∝ (k/kp)^4 * exp[-2 (k/kp)^2], with kp = (2π/L_box) * m (fixed by mode index).
+    This keeps the injection scale identical across resolutions as long as L_box and m are fixed.
     """
-def passot_pouquet_velocity(Nx, Ny, k_peak, urms_target, dx=1.0, dy=1.0, seed=1):
-    rng = np.random.default_rng(seed) #creating a reproducible random number generator
-    kx = 2*np.pi*np.fft.fftfreq(Nx, d=dx) #Nx=Ny=256 or 512
-    ky = 2*np.pi*np.fft.fftfreq(Ny, d=dy)
+def make_master_pp_hat(Nm=512, L_box=2*np.pi, m=8, urms_target=0.05, seed=4): #To have same IC for all runs
+    # master spectrum on Nm×Nm
+    dx = L_box / Nm
+    kx = 2*np.pi*np.fft.fftfreq(Nm, d=dx)
+    ky = 2*np.pi*np.fft.fftfreq(Nm, d=dx)
     KX, KY = np.meshgrid(kx, ky)
-    K = np.sqrt(KX**2 + KY**2)
-    K[0,0] = 1.0  # avoid divide-by-zero for shaping
-
-    # -------- Passot Pouquet spectral shape ---------
-    E = (K / k_peak)**4 * np.exp(-2.0*(K / k_peak)**2)
-
-    # random complex coefficients for two components
-    phase1 = rng.normal(size=(Ny, Nx)) + 1j*rng.normal(size=(Ny, Nx)) #complex gaussian random field
-    phase2 = rng.normal(size=(Ny, Nx)) + 1j*rng.normal(size=(Ny, Nx))
-
-    # amplitude ∝ sqrt(E). =>normalize to urms_target
+    K  = np.sqrt(KX**2 + KY**2); K[0,0]=1.0
+    k_peak = (2*np.pi/L_box)*m
+    E = (K/k_peak)**4 * np.exp(-2*(K/k_peak)**2)
+    rng = np.random.default_rng(seed)
+    phase1 = rng.normal(size=(Nm,Nm)) + 1j*rng.normal(size=(Nm,Nm))
+    phase2 = rng.normal(size=(Nm,Nm)) + 1j*rng.normal(size=(Nm,Nm))
     amp = np.sqrt(E)
     ux_hat = amp * phase1
     uy_hat = amp * phase2
+    # solenoidal projection
+    K2 = KX**2+KY**2; mask = K2>0
+    Px11 = np.ones_like(K2); Px22 = np.ones_like(K2)
+    Px12 = np.zeros_like(K2); Px21 = np.zeros_like(K2)
+    Px11[mask] = 1 - (KX[mask]*KX[mask])/K2[mask]
+    Px12[mask] = -(KX[mask]*KY[mask])/K2[mask]
+    Px21[mask] = -(KY[mask]*KX[mask])/K2[mask]
+    Px22[mask] = 1 - (KY[mask]*KY[mask])/K2[mask]
+    ux_hat = Px11*ux_hat + Px12*uy_hat
+    uy_hat = Px21*ux_hat + Px22*uy_hat
+    ux_hat[0,0]=0; uy_hat[0,0]=0
+    # scale to urms_target in physical space
+    ux = np.fft.ifft2(ux_hat).real
+    uy = np.fft.ifft2(uy_hat).real
+    urms = np.sqrt(np.mean(ux**2+uy**2))
+    s = urms_target/urms if urms>0 else 1.0
+    return ux_hat*s, uy_hat*s, k_peak
 
-    # ------ Solenoidal projection: (I - k k^T / k^2) to make it divergence-free ------
-    K2 = (KX**2 + KY**2)
-    mask = K2 > 0 # avoid k=0
-    Px11 = np.ones_like(K2) #P=2x2 projection tensor
-    Px22 = np.ones_like(K2)
-    Px12 = np.zeros_like(K2)
-    Px21 = np.zeros_like(K2)
-    # compute projection tensor entries only where k != 0 and assign back
-    Px11[mask] = 1.0 - (KX[mask]*KX[mask])/K2[mask]
-    Px12[mask] = - (KX[mask]*KY[mask])/K2[mask]
-    Px21[mask] = - (KY[mask]*KX[mask])/K2[mask]
-    Px22[mask] = 1.0 - (KY[mask]*KY[mask])/K2[mask]
-    # apply projection
-    ux_hat_s = Px11*ux_hat + Px12*uy_hat
-    uy_hat_s = Px21*ux_hat + Px22*uy_hat
-    # Zero the mean (k=0) explicitly
-    ux_hat_s[0,0] = 0.0
-    uy_hat_s[0,0] = 0.0
+def ic_from_master(Nx, Ny, Ux_hat_master, Uy_hat_master, urms_target=None):
+    """
+    Build ICs on an NyxNx grid by cropping the centered low-k block from the
+    master spectra, with correct FFT normalization so amplitudes are preserved.
+    Assumes even sizes and Nx,Ny <= master size.
+    """
+    Ny_m, Nx_m = Ux_hat_master.shape
+    assert Nx % 2 == 0 and Ny % 2 == 0, "Nx, Ny must be even."
+    assert Nx <= Nx_m and Ny <= Ny_m, "Target grid must not exceed master grid."
 
-    # ------- Back to physical space -------
-    ux = np.fft.ifft2(ux_hat_s).real
-    uy = np.fft.ifft2(uy_hat_s).real
-    # Scale to desired u_rms to ensure Ma=urms/cs<<1
-    urms = np.sqrt((np.mean(ux**2 + uy**2)))  # == sqrt(mean(u^2))
-    if urms > 0:
-        s = urms_target / urms #rescaling factor to get urms=0.05
-        ux *= s
-        uy *= s
+    # 1) shift to center DC at [Ny_m/2, Nx_m/2]
+    Ux_c = np.fft.fftshift(Ux_hat_master)
+    Uy_c = np.fft.fftshift(Uy_hat_master)
+
+    # 2) crop exact center window of size Ny×Nx
+    cy, cx = Ny_m // 2, Nx_m // 2
+    hy, hx = Ny // 2, Nx // 2
+    sy = slice(cy - hy, cy + hy)
+    sx = slice(cx - hx, cx + hx)
+    Ux_small_c = Ux_c[sy, sx]
+    Uy_small_c = Uy_c[sy, sx]
+
+    # 3) unshift back to FFT storage layout
+    Ux_small = np.fft.ifftshift(Ux_small_c)
+    Uy_small = np.fft.ifftshift(Uy_small_c)
+
+    # 4) *** normalization fix *** so ifft2 amplitude matches the master’s band
+    alpha = (Nx * Ny) / (Nx_m * Ny_m)
+    Ux_small *= alpha
+    Uy_small *= alpha
+
+    # 5) back to physical space
+    ux = np.fft.ifft2(Ux_small).real
+    uy = np.fft.ifft2(Uy_small).real
+
+    # optional: enforce the exact target urms (robust to small numerical drift)
+    if urms_target is not None:
+        urms = float(np.sqrt(np.mean(ux**2 + uy**2)))
+        if urms > 0:
+            s = urms_target / urms
+            ux *= s
+            uy *= s
+
     return ux, uy
+
+
+
 
     """
     Compute 1D isotropic energy spectrum E(k) by shell averaging:
@@ -132,6 +160,25 @@ def shell_avg_spectrum(ux, uy, dx=1.0, dy=1.0, nbins=None):
             k_shell[b] = np.mean(K.ravel()[mask]) # the average radius of each ring
     return k_shell, E_shell
 
+def build_nearest_index_maps(Nx_src, Ny_src, Nx_ref=512, Ny_ref=512):
+    """
+    For each ref-grid index (0..Nx_ref-1 / 0..Ny_ref-1), pick the nearest index on the source grid.
+    Assumes periodic uniform grids with nodes at i*dx.
+    Returns ix_src_for_ref (length Nx_ref), iy_src_for_ref (length Ny_ref).
+    """
+    # integer-only scaling avoids fp drift
+    ix_ref = np.arange(Nx_ref)
+    iy_ref = np.arange(Ny_ref)
+
+    ix_src_for_ref = np.rint(ix_ref * (Nx_src / Nx_ref)).astype(int)
+    iy_src_for_ref = np.rint(iy_ref * (Ny_src / Ny_ref)).astype(int)
+
+    # wrap/clamp into valid range (periodic indices)
+    ix_src_for_ref = np.mod(ix_src_for_ref, Nx_src)
+    iy_src_for_ref = np.mod(iy_src_for_ref, Ny_src)
+
+    return ix_src_for_ref, iy_src_for_ref
+
 """"
 -------------------------------------------
                     Main 
@@ -141,8 +188,9 @@ def main():
     # --------------------
     # Simulation parameters
     # --------------------
+    Nx_ref, Ny_ref = 512, 512       # reference high-res grid for error analysis
     Nx, Ny = 128, 128               # grid size, number of lattice nodes in each direction, best 512
-    L_box = 2*np.pi                 # choose a fixed physical box (common choice)
+    L_box = 2*np.pi                 # choose a fixed physical box 
     dx = L_box / Nx
     dy = L_box / Ny
     m = 8                           # best 8
@@ -150,11 +198,12 @@ def main():
     Nt = 4000                       # number of time steps
     rho0 = 1.0
     urms0 = 0.05                    # initial rms velocity (keep low Mach: u << cs ~ 1/sqrt(3))
-    tau = 0.5+ 3*urms0*Nx/(320*m)   # relaxation time Re=320, cs2=1/3, best 0.53
+    tau = 0.53                      # relaxation time with Re=320, cs2=1/3, best 0.53
     plot_every = 200
-    SAMPLE_TIMES = [1000, 2000, 3000]  # To compare across runs for error
-    K_YMIN_FIXED = 0.0              #y-axis range for kinetic energy spectrum
+    SAMPLE_TIMES = [0, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 3600]  # To compare across runs for error
+    K_YMIN_FIXED = 0.0              # y-axis range for kinetic energy spectrum
     K_YMAX_FIXED = 0.0013
+    ix_map, iy_map = build_nearest_index_maps(Nx, Ny, Nx_ref, Ny_ref)
 
     # normalization length so x-axis is kL
     L2D = 2*np.pi / k_peak  
@@ -174,7 +223,14 @@ def main():
     # --------------------
     # Passot–Pouquet initial velocity field (periodic)
     # --------------------
-    ux0, uy0 = passot_pouquet_velocity(Nx, Ny, k_peak=k_peak, urms_target=urms0, dx=dx, dy=dy, seed=4)
+    master = np.load("pp_master_512_seed4.npz")
+    master_ux_hat = master["Ux_hat"]
+    master_uy_hat = master["Uy_hat"]
+    ux0, uy0 = ic_from_master(Nx, Ny, master["Ux_hat"], master["Uy_hat"], urms_target=urms0)
+    print("t=0 urms:", np.sqrt(np.mean(ux0**2 + uy0**2)))
+    k_shell0, E_shell0 = shell_avg_spectrum(ux0, uy0, dx=dx, dy=dy, nbins=80)
+    print("E_shell0 sum:", np.sum(E_shell0))
+
 
     # Fixed vorticity color scale from t=0 (used for all frames)
     vorticity0 = ((np.roll(uy0, -1, axis=1) - np.roll(uy0,  1, axis=1)) / (2.0*dx)
@@ -238,6 +294,15 @@ def main():
     'K': [],             
     'Omega_t': [],       # enstrophy times (match SAMPLE_TIMES)
     'Omega': [],         # enstrophy values at those times
+    'u_times': [],                  # list of ints (the times)
+    'u_snaps': [],                  # list of 2D arrays (ux)
+    'v_snaps': [],                  # list of 2D arrays (uy)
+    'u_snaps_ref': [], 
+    'v_snaps_ref': [],
+    'Nx_ref': Nx_ref, 
+    'Ny_ref': Ny_ref,
+    'ix_map': ix_map, 
+    'iy_map': iy_map,
 }
 
     #------------------------- time loop -------------------------------
@@ -278,8 +343,9 @@ def main():
         results['K']   = K_hist[:]
 
         # --- Diagnostics/plots ---
-        if it % (5*plot_every) == 0 or it == Nt-1:
+        if it % (2*plot_every) == 0 or it == Nt-1:
             k_shell, E_shell = shell_avg_spectrum(ux, uy,dx=dx, dy=dy, nbins=80)
+            msk = (k_shell > 0) & (E_shell > 0)
             K_from_spectrum = np.sum(E_shell)
             K_from_field = K
             print(f"t={it:5d} | K_spectrum={K_from_spectrum:.6e} | K_field={K_from_field:.6e} | rel.err={(K_from_spectrum-K_from_field)/K_from_field:.2e}")
@@ -303,69 +369,75 @@ def main():
             if np.any(msk):
                 kL, E_dim = to_dimensionless(k_shell[msk], E_shell[msk], ux, uy, L2D)
 
-            # --- store spectra & enstrophy at selected times for error ---
-            if it in SAMPLE_TIMES and np.any(msk):
-                # store spectrum
-                results['spec_t'].append(it)
-                results['spec_kL'].append(kL.copy())
-                results['spec_E'].append(E_dim.copy())
-                # enstrophy Ω = 1/2 <ω^2> 
-                omega = vorticity  
-                Omega = 0.5 * float(np.mean(omega**2))
-                results['Omega_t'].append(it)
-                results['Omega'].append(Omega)
+                # --- store spectra & enstrophy at selected times for error ---
+                if it in SAMPLE_TIMES:
+                    # store spectrum
+                    results['spec_t'].append(it)
+                    results['spec_kL'].append(kL.copy())
+                    results['spec_E'].append(E_dim.copy())
+                    # enstrophy Ω = 1/2 <ω^2> 
+                    omega = vorticity  
+                    Omega = 0.5 * float(np.mean(omega**2))
+                    results['Omega_t'].append(it)
+                    results['Omega'].append(Omega)
+                    # store velocity snapshots (copy to avoid later mutation)
+                    results['u_times'].append(int(it))
+                    results['u_snaps'].append(ux.copy())
+                    results['v_snaps'].append(uy.copy())
 
-            # right panel of fig1, instantaneous spectrum
-            ax2.clear()
-            ax2.loglog(kL, E_dim, linestyle='-', lw=1.5)
-            ax2.set_xlabel(r'$kL$')
-            ax2.set_ylabel(r'$E(k)/(u^{\prime 2}L)$')
-            ax2.set_title(f'Energy spectrum, t={it}')
-            ax2.axvline(k_peak*L2D, color='r', linestyle='--', label=r'$k_pL$')
-            ax2.axvline(kL_nyq,    ls=':', color='black', alpha=0.5, label='Nyquist')
-            ax2.legend(loc="best", fontsize=14)
-            ax2.set_xlim(1, min(1000, float(kL.max())*1.05))
+                # right panel of fig1, instantaneous spectrum
+                ax2.clear()
+                ax2.loglog(kL, E_dim, linestyle='-', lw=1.5)
+                ax2.set_xlabel(r'$kL$')
+                ax2.set_ylabel(r'$E(k)/(u^{\prime 2}L)$')
+                ax2.set_title(f'Energy spectrum, t={it}')
+                ax2.axvline(k_peak*L2D, color='r', linestyle='--', label=r'$k_pL$')
+                ax2.axvline(kL_nyq,    ls=':', color='black', alpha=0.5, label='Nyquist')
+                ax2.legend(loc="best", fontsize=14)
+                ax2.set_xlim(1, min(1000, float(kL.max())*1.05))
 
-            # multi-time spectra figure2 (dimensionless)
-            ax_spec.plot(kL, E_dim, label=f't={it}', lw=1)
-            # set limits and add k^-3
-            if not xlim_set:
-                ax_spec.set_xlim(1, min(1000, float(kL.max())*1.05))
-                k_ref = 10.0
-                if not (kL.min() < k_ref < kL.max()):
-                    k_ref = float(np.exp(0.5*(np.log(kL.min()) + np.log(kL.max()))))
-                E_ref = float(np.interp(k_ref, kL, E_dim))
-                k_line = np.array([k_ref/4, k_ref*4])
-                k_line[0] = max(k_line[0], ax_spec.get_xlim()[0])
-                k_line[1] = min(k_line[1], ax_spec.get_xlim()[1])
-                E_line = E_ref * (k_line / k_ref)**(-3.0)
-                ax_spec.plot(k_line, E_line, 'k--', lw=2, label=r'$k^{-3}$')
-                xlim_set = True
+                # multi-time spectra figure2 (dimensionless)
+                ax_spec.plot(kL, E_dim, label=f't={it}', lw=1)
+                # set limits and add k^-3
+                if not xlim_set:
+                    ax_spec.set_xlim(1, min(1000, float(kL.max())*1.05))
+                    k_ref = 10.0
+                    if not (kL.min() < k_ref < kL.max()):
+                        k_ref = float(np.exp(0.5*(np.log(kL.min()) + np.log(kL.max()))))
+                    E_ref = float(np.interp(k_ref, kL, E_dim))
+                    k_line = np.array([k_ref/4, k_ref*4])
+                    k_line[0] = max(k_line[0], ax_spec.get_xlim()[0])
+                    k_line[1] = min(k_line[1], ax_spec.get_xlim()[1])
+                    E_line = E_ref * (k_line / k_ref)**(-3.0)
+                    ax_spec.plot(k_line, E_line, 'k--', lw=2, label=r'$k^{-3}$')
+                    xlim_set = True
 
-            ax_spec.legend(loc='lower left', fontsize=14)
+                ax_spec.legend(loc='lower left', fontsize=14)
 
-            # zoomed figure update
-            ax_zoom.plot(kL, E_dim, lw=1, label=f't={it}')
-            ax_zoom.set_xlim(zoom_x_lo, min(zoom_x_hi, float(kL.max())))
-            ax_zoom.set_ylim(*ZOOM_YLIMS)   
+                # zoomed figure update
+                ax_zoom.plot(kL, E_dim, lw=1, label=f't={it}')
+                ax_zoom.set_xlim(zoom_x_lo, min(zoom_x_hi, float(kL.max())))
+                ax_zoom.set_ylim(*ZOOM_YLIMS)   
 
-            # add k^-3 line in the zoomed figure 
-            if not zoom_line_added:
-                # anchor slope at geometric mid of the zoomed x-window
-                x0, x1 = ax_zoom.get_xlim()
-                k_ref_z = np.sqrt(x0 * x1)
-                if not (kL.min() < k_ref_z < kL.max()):
-                    k_ref_z = float(np.exp(0.5*(np.log(kL.min()) + np.log(kL.max()))))
-                E_ref_z = float(np.interp(k_ref_z, kL, E_dim))
-                k_line_z = np.array([x0, x1])
-                E_line_z = E_ref_z * (k_line_z / k_ref_z)**(-3.0)
-                ax_zoom.plot(k_line_z, E_line_z, 'k--', lw=2, label=r'$k^{-3}$')
-                zoom_line_added = True
+                # add k^-3 line in the zoomed figure 
+                if not zoom_line_added:
+                    # anchor slope at geometric mid of the zoomed x-window
+                    x0, x1 = ax_zoom.get_xlim()
+                    k_ref_z = np.sqrt(x0 * x1)
+                    if not (kL.min() < k_ref_z < kL.max()):
+                        k_ref_z = float(np.exp(0.5*(np.log(kL.min()) + np.log(kL.max()))))
+                    E_ref_z = float(np.interp(k_ref_z, kL, E_dim))
+                    k_line_z = np.array([x0, x1])
+                    E_line_z = E_ref_z * (k_line_z / k_ref_z)**(-3.0)
+                    ax_zoom.plot(k_line_z, E_line_z, 'k--', lw=2, label=r'$k^{-3}$')
+                    zoom_line_added = True
 
-            ax_zoom.legend(loc='lower left', fontsize=14)
+                ax_zoom.legend(loc='lower left', fontsize=14)
+            # (if mask is empty, skip spectrum plotting this frame)
         plt.pause(0.001)
 
     plt.show(block=False)
+
 
     # ----- Plot kinetic energy decay -----
     plt.figure(figsize=(6,4))

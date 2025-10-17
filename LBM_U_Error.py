@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import glob, os
 
 L_BOX_DEFAULT = 2*np.pi
+URMS0_DEFAULT = 0.05   # initial urms used in the solver
 
 def _as_list(x):
     if isinstance(x, np.ndarray) and x.dtype == object:
@@ -92,7 +93,7 @@ def load_run_native(path):
     d = np.load(path, allow_pickle=True)
     Nx = int(d["Nx"]); Ny = int(d["Ny"])
 
-    # Reconstruct L_box if not saved explicitly
+    # L_box as before
     if "L_box" in d:
         L_box = float(d["L_box"])
     elif "L2D" in d and "k_peak" in d:
@@ -100,36 +101,43 @@ def load_run_native(path):
     else:
         L_box = L_BOX_DEFAULT
 
+    # tau / Re0 (if present), else compute Re0 from URMS0_DEFAULT and L2D
+    tau  = float(d["tau"]) if "tau" in d else np.nan
+    Re0  = float(d["Re0"]) if "Re0" in d else None
+    if Re0 is None:
+        L2D = float(d["L2D"]) if "L2D" in d else (L_box / 8.0)  # m=8 default
+        if not np.isnan(tau):
+            nu = (1.0/3.0)*(tau-0.5)
+            Re0 = URMS0_DEFAULT * L2D / nu
+        else:
+            Re0 = np.nan
+
     times = np.array(d["u_times"], dtype=int) if "u_times" in d else np.array([], dtype=int)
 
-    # Prefer ref snapshots ONLY if they are NON-EMPTY
+    # Prefer non-empty ref snapshots (same as you had)
     has_ref_keys = ("u_snaps_ref" in d and "v_snaps_ref" in d)
     ref_nonempty = has_ref_keys and (d["u_snaps_ref"].size > 0) and (d["v_snaps_ref"].size > 0)
 
     if ref_nonempty:
         ux_list = _as_list(d["u_snaps_ref"])
         uy_list = _as_list(d["v_snaps_ref"])
-        Ny_ref, Nx_ref = ux_list[0].shape if ux_list else (None, None)
-        ref = {"has_ref": True, "Nx_ref": Nx_ref, "Ny_ref": Ny_ref}
     else:
-        # Use native and we’ll resample later
         ux_list = _as_list(d["u_snaps"]) if "u_snaps" in d else []
         uy_list = _as_list(d["v_snaps"]) if "v_snaps" in d else []
-        ref = {"has_ref": False}
 
-    # Align lengths
     n = min(len(times), len(ux_list), len(uy_list))
     times = times[:n]; ux_list = ux_list[:n]; uy_list = uy_list[:n]
 
     return {
         "path": path, "Nx": Nx, "Ny": Ny, "L_box": L_box,
+        "tau": tau, "Re0": Re0,
         "times": times,
         "ux_list_native": ux_list, "uy_list_native": uy_list,
-        "ref_info": ref
     }
 
+
 def main(pattern="lbm_run_N*.npz"):
-    MAX_T = 2800   # compare up to this time step (t=0..MAX_T)
+    MAX_T = 400   # compare up to this time step (t=0..MAX_T)
 
     files = sorted(glob.glob(pattern))
     if not files:
@@ -155,81 +163,81 @@ def main(pattern="lbm_run_N*.npz"):
             r["ux_list_ref"].append(ux_r)
             r["uy_list_ref"].append(uy_r)
 
-
     # Smallest Nyquist (min N)
     N_min = min(r["Nx"] for r in runs)
     k_cut = np.pi * N_min / L_box
     print(f"Using smallest Nyquist cut-off: N_min={N_min}, k_cut={k_cut:.6f} rad/unit")
+
+    # Precompute low-passed DNS snapshots
     dns_lp_cache = {}
     for i, t in enumerate(dns["times"]):
         ux_a, uy_a = dns["ux_list_ref"][i], dns["uy_list_ref"][i]
         dns_lp_cache[int(t)] = fft_lowpass(ux_a, uy_a, k_cut, L_box)
 
-    # Intersect times with DNS
-    times_dns = set(dns["times"].tolist())
-    pts = []  # (Nx, rel_L2_RMS, filename)
+    curves = {}   # tau -> list of (N, err_RMS, Re0, filename)
 
-    for r in sorted(runs, key=lambda x: x["Nx"]):
-        common = np.array(sorted(list(times_dns.intersection(set(r["times"].tolist())))))
-        common = common[common <= MAX_T]
+    for r in sorted(runs, key=lambda x: (x["tau"], x["Nx"])):
+        # spectral resample each snapshot to DNS grid
+        r["ux_list_ref"], r["uy_list_ref"] = [], []
+        for ux, uy in zip(r["ux_list_native"], r["uy_list_native"]):
+            ux_r, uy_r = spectral_resample_to_ref(ux, uy, r["Nx"], r["Ny"], Nx_ref, Ny_ref)
+            r["ux_list_ref"].append(ux_r)
+            r["uy_list_ref"].append(uy_r)
+
+        # common times with DNS
+        common = np.intersect1d(r["times"], dns["times"])
         if common.size == 0:
-            print(f"Skipping {os.path.basename(r['path'])}: no common times ≤ {MAX_T} with DNS.")
+            print(f"Skipping {os.path.basename(r['path'])}: no common times with DNS.")
             continue
 
         idx_r = {int(t): i for i, t in enumerate(r["times"])}
-        idx_a = {int(t): i for i, t in enumerate(dns["times"])}
 
         errs = []
         for t in common:
             ir = idx_r[int(t)]
-            ia = idx_a[int(t)]
+            # coarse low-pass
+            ux_c, uy_c = fft_lowpass(r["ux_list_ref"][ir], r["uy_list_ref"][ir], k_cut, L_box)
+            # DNS low-pass from cache
+            ux_a, uy_a = dns_lp_cache[int(t)]
 
-            ux_c, uy_c = r["ux_list_ref"][ir], r["uy_list_ref"][ir]
-            ux_a, uy_a = dns["ux_list_ref"][ia], dns["uy_list_ref"][ia]
-
-            # low-pass to smallest Nyquist
-            ux_c, uy_c = fft_lowpass(ux_c, uy_c, k_cut, L_box)
-            ux_a, uy_a = fft_lowpass(ux_a, uy_a, k_cut, L_box)
-
-            # discrete L2 norms over the grid
             diff_L2 = np.sqrt(np.sum((ux_c - ux_a)**2 + (uy_c - uy_a)**2))
             ref_L2  = np.sqrt(np.sum(ux_a**2 + uy_a**2))
             if ref_L2 > 0:
                 errs.append(diff_L2 / ref_L2)
 
-            ux_c, uy_c = fft_lowpass(r["ux_list_ref"][ir], r["uy_list_ref"][ir], k_cut, L_box)
-            ux_a, uy_a = dns_lp_cache[int(t)]
-
-            if t in (0, 1000, 2000, 3000):
-                print(f"N={r['Nx']}, t={t}: rel_L2 = {np.sqrt(np.sum((ux_c-ux_a)**2 + (uy_c-uy_a)**2)) / np.sqrt(np.sum(ux_a**2 + uy_a**2)):.3e}")
-
-        if len(errs) == 0:
+        if not errs:
             print(f"Skipping {os.path.basename(r['path'])}: empty/NaN errors.")
             continue
 
-        # RMS over sample times
         rel_L2_RMS = float(np.sqrt(np.mean(np.square(errs))))
-        pts.append((r["Nx"], rel_L2_RMS, os.path.basename(r["path"])))
-        
-        if not pts:
-            raise RuntimeError("No comparable runs (no overlapping times with DNS).")
-        
-    # Print and plot
-    print("\nGrid size vs relative error (k ≤ k_nyq(Nmin)):")
-    for N, e, name in pts:
-        tag = " (DNS)" if N==Nx_ref else ""
-        print(f"  N={N:4d}  RelErr={e:.6e}   {name}{tag}")
+        tau_key = float(r["tau"])
+        curves.setdefault(tau_key, []).append((r["Nx"], rel_L2_RMS, r["Re0"], os.path.basename(r["path"])))
 
-    Ns  = [p[0] for p in pts]
-    Err = [p[1] for p in pts]
+    # ---- Print & plot one curve per tau/Re ----
+    if not curves:
+        raise RuntimeError("No comparable runs (no overlapping times with DNS).")
+
     plt.figure(figsize=(6,4))
-    plt.plot(Ns, Err, marker="o", lw=2)
+    for tau in sorted(curves.keys()):
+        items = sorted(curves[tau], key=lambda x: x[0])  # sort by N
+        Ns   = [it[0] for it in items]
+        Errs = [it[1] for it in items]
+        Re0s = [it[2] for it in items]
+        label = f"Re≈{Re0s[0]:.0f} (τ={tau:.2f})"
+        plt.plot(Ns, Errs, marker="o", lw=2, label=label)
+
+        # console print
+        print(f"\nτ={tau:.2f}  Re≈{Re0s[0]:.0f}")
+        for (N, e, Re0, name) in items:
+            tag = " (DNS)" if N == Nx_ref else ""
+            print(f"  N={N:4d}  RelErr={e:.6e}  {name}{tag}")
+
     plt.xlabel("Grid size N")
-    plt.ylabel("Relative error")
+    plt.ylabel("Relative error in velocity U")
     plt.title(f"Convergence vs resolution (k ≤ k_nyq(Nmin={N_min}))")
     plt.grid(True, alpha=0.3)
-    # optional:
-    # plt.xscale('log', base=2); plt.yscale('log')
+    plt.legend()
+    plt.tight_layout()
     plt.show()
 
 if __name__ == "__main__":

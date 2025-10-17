@@ -39,44 +39,6 @@ def feq_D2Q9(rho, ux, uy, cxs, cys, w):
         )
     return Feq
 
-    """
-    Build a periodic 2D velocity field with Passot Pouquet spectrum
-    E(k) ∝ (k/kp)^4 * exp[-2 (k/kp)^2], with kp = (2π/L_box) * m (fixed by mode index).
-    This keeps the injection scale identical across resolutions as long as L_box and m are fixed.
-    """
-def make_master_pp_hat(Nm=512, L_box=2*np.pi, m=8, urms_target=0.05, seed=4): #To have same IC for all runs
-    # master spectrum on Nm×Nm
-    dx = L_box / Nm
-    kx = 2*np.pi*np.fft.fftfreq(Nm, d=dx)
-    ky = 2*np.pi*np.fft.fftfreq(Nm, d=dx)
-    KX, KY = np.meshgrid(kx, ky)
-    K  = np.sqrt(KX**2 + KY**2); K[0,0]=1.0
-    k_peak = (2*np.pi/L_box)*m
-    E = (K/k_peak)**4 * np.exp(-2*(K/k_peak)**2)
-    rng = np.random.default_rng(seed)
-    phase1 = rng.normal(size=(Nm,Nm)) + 1j*rng.normal(size=(Nm,Nm))
-    phase2 = rng.normal(size=(Nm,Nm)) + 1j*rng.normal(size=(Nm,Nm))
-    amp = np.sqrt(E)
-    ux_hat = amp * phase1
-    uy_hat = amp * phase2
-    # solenoidal projection
-    K2 = KX**2+KY**2; mask = K2>0
-    Px11 = np.ones_like(K2); Px22 = np.ones_like(K2)
-    Px12 = np.zeros_like(K2); Px21 = np.zeros_like(K2)
-    Px11[mask] = 1 - (KX[mask]*KX[mask])/K2[mask]
-    Px12[mask] = -(KX[mask]*KY[mask])/K2[mask]
-    Px21[mask] = -(KY[mask]*KX[mask])/K2[mask]
-    Px22[mask] = 1 - (KY[mask]*KY[mask])/K2[mask]
-    ux_hat = Px11*ux_hat + Px12*uy_hat
-    uy_hat = Px21*ux_hat + Px22*uy_hat
-    ux_hat[0,0]=0; uy_hat[0,0]=0
-    # scale to urms_target in physical space
-    ux = np.fft.ifft2(ux_hat).real
-    uy = np.fft.ifft2(uy_hat).real
-    urms = np.sqrt(np.mean(ux**2+uy**2))
-    s = urms_target/urms if urms>0 else 1.0
-    return ux_hat*s, uy_hat*s, k_peak
-
 def ic_from_master(Nx, Ny, Ux_hat_master, Uy_hat_master, urms_target=None):
     """
     Build ICs on an NyxNx grid by cropping the centered low-k block from the
@@ -121,9 +83,6 @@ def ic_from_master(Nx, Ny, Ux_hat_master, Uy_hat_master, urms_target=None):
             uy *= s
 
     return ux, uy
-
-
-
 
     """
     Compute 1D isotropic energy spectrum E(k) by shell averaging:
@@ -195,12 +154,12 @@ def main():
     dy = L_box / Ny
     m = 8                           # best 8
     k_peak = m * 2*np.pi / L_box 
-    Nt = 4000                       # number of time steps
+    Nt = 500                       # number of time steps
     rho0 = 1.0
     urms0 = 0.05                    # initial rms velocity (keep low Mach: u << cs ~ 1/sqrt(3))
-    tau = 0.53                      # relaxation time with Re=320, cs2=1/3, best 0.53
-    plot_every = 200
-    SAMPLE_TIMES = [0, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 3600]  # To compare across runs for error
+    tau = 0.51                      # relaxation time with Re=320, cs2=1/3, best 0.53
+    plot_every = 50
+    SAMPLE_TIMES = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500]  # To compare across runs for error
     K_YMIN_FIXED = 0.0              # y-axis range for kinetic energy spectrum
     K_YMAX_FIXED = 0.0013
     ix_map, iy_map = build_nearest_index_maps(Nx, Ny, Nx_ref, Ny_ref)
@@ -223,7 +182,7 @@ def main():
     # --------------------
     # Passot–Pouquet initial velocity field (periodic)
     # --------------------
-    master = np.load("pp_master_512_seed4.npz")
+    master = np.load(f"pp_master_512_seed4_L{int(L_box)}.npz")
     master_ux_hat = master["Ux_hat"]
     master_uy_hat = master["Uy_hat"]
     ux0, uy0 = ic_from_master(Nx, Ny, master["Ux_hat"], master["Uy_hat"], urms_target=urms0)
@@ -284,9 +243,18 @@ def main():
     ZOOM_YLIMS = (1e-10, 1e2)               # fixed y-limits
     ax_zoom.set_ylim(*ZOOM_YLIMS)           
 
+    nu   = (1.0/3.0) * (tau - 0.5)
+    Re0  = urms0 * L_box / nu    
     # ----------- For storage for error -----------
     results = {
-    'Nx': Nx, 'Ny': Ny, 'tau': tau, 'k_peak': k_peak, 'L2D': L2D,
+    'Nx': Nx, 'Ny': Ny,
+    'tau': tau,
+    'nu': nu,
+    'Re0': Re0,
+    'L_box': L_box,
+    'm': m,
+    'k_peak': k_peak,
+    'L2D': L2D,
     'spec_t': [],        # times when we store spectra
     'spec_kL': [],       # list of arrays
     'spec_E': [],        # list of arrays (E/(u'^2 L))
@@ -294,16 +262,12 @@ def main():
     'K': [],             
     'Omega_t': [],       # enstrophy times (match SAMPLE_TIMES)
     'Omega': [],         # enstrophy values at those times
-    'u_times': [],                  # list of ints (the times)
-    'u_snaps': [],                  # list of 2D arrays (ux)
-    'v_snaps': [],                  # list of 2D arrays (uy)
-    'u_snaps_ref': [], 
-    'v_snaps_ref': [],
-    'Nx_ref': Nx_ref, 
-    'Ny_ref': Ny_ref,
-    'ix_map': ix_map, 
-    'iy_map': iy_map,
+    # velocity snapshots at selected times (native grid)
+    'u_times': [],       # list[int]
+    'u_snaps': [],       # list[Ny×Nx] (ux)
+    'v_snaps': [],       # list[Ny×Nx] (uy)
 }
+
 
     #------------------------- time loop -------------------------------
     for it in range(Nt):
@@ -343,7 +307,7 @@ def main():
         results['K']   = K_hist[:]
 
         # --- Diagnostics/plots ---
-        if it % (2*plot_every) == 0 or it == Nt-1:
+        if it % (plot_every) == 0 or it == Nt-1:
             k_shell, E_shell = shell_avg_spectrum(ux, uy,dx=dx, dy=dy, nbins=80)
             msk = (k_shell > 0) & (E_shell > 0)
             K_from_spectrum = np.sum(E_shell)
@@ -450,8 +414,10 @@ def main():
     plt.show()
 
     # ----- Saving for error -----
-    np.savez_compressed(f'lbm_run_N{Nx}.npz', **results)
-    print(f"Saved convergence data to lbm_run_N{Nx}.npz")
+    fname   = f"lbm_run_N{Nx}_{tau}.npz"
+    np.savez_compressed(fname, **results)
+    print(f"Saved convergence data to {fname}  (Re≈{Re0:.0f})")
+
 
 
 if __name__ == "__main__":

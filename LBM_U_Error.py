@@ -5,6 +5,15 @@ import glob, os
 L_BOX_DEFAULT = 2*np.pi
 URMS0_DEFAULT = 0.05   # initial urms used in the solver
 
+plt.rcParams.update({
+    "axes.titlesize": 18,   # subplot titles
+    "axes.labelsize": 16,   # x/y labels
+    "legend.fontsize": 14,  # legend text
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "figure.titlesize": 20  # suptitle
+})
+
 def _as_list(x):
     if isinstance(x, np.ndarray) and x.dtype == object:
         return [xi for xi in x]
@@ -34,14 +43,14 @@ def fft_lowpass(ux, uy, k_cut, L_box):
     Ux *= mask; Uy *= mask
     return np.fft.ifft2(Ux).real, np.fft.ifft2(Uy).real
 
-def spectral_resample_to_ref(ux, uy, Nx_src, Ny_src, Nx_ref, Ny_ref):
-    """
-    Band-limited resampling from Ny_src×Nx_src -> Ny_ref×Nx_ref using FFT.
+"""
+Band-limited resampling from Ny_srcxNx_src -> Ny_refxNx_ref using FFT.
     - Crops (if ref < src) or zero-pads (if ref > src) the centered spectrum.
     - Applies the correct normalization so physical amplitudes are preserved:
         beta = (Nx_ref*Ny_ref)/(Nx_src*Ny_src)
-    Returns (ux_ref, uy_ref) on the reference grid.
-    """
+Returns (ux_ref, uy_ref) on the reference grid.
+"""
+def spectral_resample_to_ref(ux, uy, Nx_src, Ny_src, Nx_ref, Ny_ref):
     # FFT on the source grid
     Ux = np.fft.fft2(ux); Uy = np.fft.fft2(uy)
 
@@ -135,26 +144,18 @@ def load_run_native(path):
         "ux_list_native": ux_list, "uy_list_native": uy_list,
     }
 
+def analyze_group(runs_group, group_name):
+    if not runs_group:
+        print(f"[{group_name}] No runs with usable snapshots; skipping.")
+        return
 
-def main(pattern="lbm_run_N*.npz"):
-    MAX_T = 400   # compare up to this time step (t=0..MAX_T)
-
-    files = sorted(glob.glob(pattern))
-    if not files:
-        raise FileNotFoundError(f"No files match {pattern}")
-
-    runs = [load_run_native(f) for f in files]
-    runs = [r for r in runs if len(r["times"]) > 0 and len(r["ux_list_native"]) > 0]
-    if not runs:
-        raise RuntimeError("No runs with usable snapshots found (empty ref arrays detected & no native fallback).")
-
-    # DNS = largest Nx (reference grid)
-    dns = max(runs, key=lambda r: r["Nx"])
+    # DNS = largest Nx **within this group**
+    dns = max(runs_group, key=lambda r: r["Nx"])
     L_box = dns["L_box"]
     Nx_ref, Ny_ref = dns["Nx"], dns["Ny"]
 
-    # Build ref snapshots for every run (spectral resample to DNS grid)
-    for r in runs:
+    # spectral-resample every run’s snapshots to the group DNS grid
+    for r in runs_group:
         r["ux_list_ref"], r["uy_list_ref"] = [], []
         for ux, uy in zip(r["ux_list_native"], r["uy_list_native"]):
             ux_r, uy_r = spectral_resample_to_ref(
@@ -163,82 +164,95 @@ def main(pattern="lbm_run_N*.npz"):
             r["ux_list_ref"].append(ux_r)
             r["uy_list_ref"].append(uy_r)
 
-    # Smallest Nyquist (min N)
-    N_min = min(r["Nx"] for r in runs)
+    # bandlimit at smallest Nyquist **in this group**
+    N_min = min(r["Nx"] for r in runs_group)
     k_cut = np.pi * N_min / L_box
-    print(f"Using smallest Nyquist cut-off: N_min={N_min}, k_cut={k_cut:.6f} rad/unit")
+    print(f"[{group_name}] Using k_cut from N_min={N_min}: k_cut={k_cut:.6f}")
 
-    # Precompute low-passed DNS snapshots
+    # cache low-passed DNS snapshots
     dns_lp_cache = {}
     for i, t in enumerate(dns["times"]):
         ux_a, uy_a = dns["ux_list_ref"][i], dns["uy_list_ref"][i]
         dns_lp_cache[int(t)] = fft_lowpass(ux_a, uy_a, k_cut, L_box)
 
-    curves = {}   # tau -> list of (N, err_RMS, Re0, filename)
+    curves = {}  # tau -> list of (N, err_RMS, Re0, filename)
 
-    for r in sorted(runs, key=lambda x: (x["tau"], x["Nx"])):
-        # spectral resample each snapshot to DNS grid
-        r["ux_list_ref"], r["uy_list_ref"] = [], []
-        for ux, uy in zip(r["ux_list_native"], r["uy_list_native"]):
-            ux_r, uy_r = spectral_resample_to_ref(ux, uy, r["Nx"], r["Ny"], Nx_ref, Ny_ref)
-            r["ux_list_ref"].append(ux_r)
-            r["uy_list_ref"].append(uy_r)
-
-        # common times with DNS
+    for r in sorted(runs_group, key=lambda x: (x["tau"], x["Nx"])):
         common = np.intersect1d(r["times"], dns["times"])
         if common.size == 0:
-            print(f"Skipping {os.path.basename(r['path'])}: no common times with DNS.")
+            print(f"[{group_name}] Skipping {os.path.basename(r['path'])}: no common times with DNS.")
             continue
-
         idx_r = {int(t): i for i, t in enumerate(r["times"])}
 
         errs = []
         for t in common:
             ir = idx_r[int(t)]
-            # coarse low-pass
             ux_c, uy_c = fft_lowpass(r["ux_list_ref"][ir], r["uy_list_ref"][ir], k_cut, L_box)
-            # DNS low-pass from cache
             ux_a, uy_a = dns_lp_cache[int(t)]
-
             diff_L2 = np.sqrt(np.sum((ux_c - ux_a)**2 + (uy_c - uy_a)**2))
             ref_L2  = np.sqrt(np.sum(ux_a**2 + uy_a**2))
             if ref_L2 > 0:
                 errs.append(diff_L2 / ref_L2)
 
         if not errs:
-            print(f"Skipping {os.path.basename(r['path'])}: empty/NaN errors.")
+            print(f"[{group_name}] Skipping {os.path.basename(r['path'])}: empty/NaN errors.")
             continue
 
         rel_L2_RMS = float(np.sqrt(np.mean(np.square(errs))))
         tau_key = float(r["tau"])
-        curves.setdefault(tau_key, []).append((r["Nx"], rel_L2_RMS, r["Re0"], os.path.basename(r["path"])))
+        curves.setdefault(tau_key, []).append(
+            (r["Nx"], rel_L2_RMS, r["Re0"], os.path.basename(r["path"]))
+        )
 
-    # ---- Print & plot one curve per tau/Re ----
     if not curves:
-        raise RuntimeError("No comparable runs (no overlapping times with DNS).")
+        print(f"[{group_name}] No comparable runs; nothing to plot.")
+        return
 
+    # --- plot this group's curve(s) ---
     plt.figure(figsize=(6,4))
     for tau in sorted(curves.keys()):
-        items = sorted(curves[tau], key=lambda x: x[0])  # sort by N
+        items = sorted(curves[tau], key=lambda x: x[0])
         Ns   = [it[0] for it in items]
         Errs = [it[1] for it in items]
         Re0s = [it[2] for it in items]
-        label = f"Re≈{Re0s[0]:.0f} (τ={tau:.2f})"
+        label = f"Re≈{Re0s[0]:.0f} (τ={tau:.4f})"
         plt.plot(Ns, Errs, marker="o", lw=2, label=label)
 
-        # console print
-        print(f"\nτ={tau:.2f}  Re≈{Re0s[0]:.0f}")
+        print(f"\n[{group_name}] τ={tau:.4f}  Re≈{Re0s[0]:.0f}")
         for (N, e, Re0, name) in items:
             tag = " (DNS)" if N == Nx_ref else ""
             print(f"  N={N:4d}  RelErr={e:.6e}  {name}{tag}")
 
     plt.xlabel("Grid size N")
     plt.ylabel("Relative error in velocity U")
-    plt.title(f"Convergence vs resolution (k ≤ k_nyq(Nmin={N_min}))")
+    plt.title(f"{group_name}: Convergence vs resolution (k ≤ k_nyq(Nmin={N_min}))")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
     plt.show()
+
+def main(pattern="lbm_run_N*.npz"):
+    MAX_T = 400   # compare up to this time step (t=0..MAX_T)
+
+    files = sorted(glob.glob(pattern))
+    files += sorted(glob.glob("lbm_runMRT_N*.npz"))  # add MRT files
+    files = sorted(set(files))  # dedupe
+
+    if not files:
+        raise FileNotFoundError(f"No files match {pattern}")
+
+    runs_all = [load_run_native(f) for f in files]
+    runs_all = [r for r in runs_all if len(r["times"]) > 0 and len(r["ux_list_native"]) > 0]
+    if not runs_all:
+        raise RuntimeError("No runs with usable snapshots found.")
+
+    # Split by filename into two groups
+    runs_bgk = [r for r in runs_all if "MRT" not in r["path"]]
+    runs_mrt = [r for r in runs_all if "MRT"     in r["path"]]
+
+    # Two separate analyses/plots
+    analyze_group(runs_bgk, "BGK")
+    analyze_group(runs_mrt, "MRT")
 
 if __name__ == "__main__":
     main()

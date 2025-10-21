@@ -144,92 +144,109 @@ def load_run_native(path):
         "ux_list_native": ux_list, "uy_list_native": uy_list,
     }
 
-def analyze_group(runs_group, group_name):
+"""
+Per-τ convergence analysis. Returns the maximum error seen (for y-axis scaling).
+    - y_limits: tuple (ymin, ymax) to enforce same scale across groups (or None).
+    - do_plot: False to only compute/print and return ymax without plotting.
+"""
+def analyze_group(runs_group, group_name, y_limits=None, do_plot=True):
     if not runs_group:
         print(f"[{group_name}] No runs with usable snapshots; skipping.")
-        return
+        return 0.0
 
-    # DNS = largest Nx **within this group**
-    dns = max(runs_group, key=lambda r: r["Nx"])
-    L_box = dns["L_box"]
-    Nx_ref, Ny_ref = dns["Nx"], dns["Ny"]
-
-    # spectral-resample every run’s snapshots to the group DNS grid
+    # ---- bucket by tau ----
+    buckets = {}
     for r in runs_group:
-        r["ux_list_ref"], r["uy_list_ref"] = [], []
-        for ux, uy in zip(r["ux_list_native"], r["uy_list_native"]):
-            ux_r, uy_r = spectral_resample_to_ref(
-                ux, uy, Nx_src=r["Nx"], Ny_src=r["Ny"], Nx_ref=Nx_ref, Ny_ref=Ny_ref
-            )
-            r["ux_list_ref"].append(ux_r)
-            r["uy_list_ref"].append(uy_r)
-
-    # bandlimit at smallest Nyquist **in this group**
-    N_min = min(r["Nx"] for r in runs_group)
-    k_cut = np.pi * N_min / L_box
-    print(f"[{group_name}] Using k_cut from N_min={N_min}: k_cut={k_cut:.6f}")
-
-    # cache low-passed DNS snapshots
-    dns_lp_cache = {}
-    for i, t in enumerate(dns["times"]):
-        ux_a, uy_a = dns["ux_list_ref"][i], dns["uy_list_ref"][i]
-        dns_lp_cache[int(t)] = fft_lowpass(ux_a, uy_a, k_cut, L_box)
-
-    curves = {}  # tau -> list of (N, err_RMS, Re0, filename)
-
-    for r in sorted(runs_group, key=lambda x: (x["tau"], x["Nx"])):
-        common = np.intersect1d(r["times"], dns["times"])
-        if common.size == 0:
-            print(f"[{group_name}] Skipping {os.path.basename(r['path'])}: no common times with DNS.")
+        tau = float(r["tau"]) if np.isfinite(r["tau"]) else None
+        if tau is None:
+            print(f"[{group_name}] Skipping {os.path.basename(r['path'])}: missing tau")
             continue
-        idx_r = {int(t): i for i, t in enumerate(r["times"])}
+        buckets.setdefault(tau, []).append(r)
 
-        errs = []
-        for t in common:
-            ir = idx_r[int(t)]
-            ux_c, uy_c = fft_lowpass(r["ux_list_ref"][ir], r["uy_list_ref"][ir], k_cut, L_box)
-            ux_a, uy_a = dns_lp_cache[int(t)]
-            diff_L2 = np.sqrt(np.sum((ux_c - ux_a)**2 + (uy_c - uy_a)**2))
-            ref_L2  = np.sqrt(np.sum(ux_a**2 + uy_a**2))
-            if ref_L2 > 0:
-                errs.append(diff_L2 / ref_L2)
+    ymax_all = 0.0
+    if do_plot:
+        plt.figure(figsize=(6,4))
 
-        if not errs:
-            print(f"[{group_name}] Skipping {os.path.basename(r['path'])}: empty/NaN errors.")
+    for tau, bucket in sorted(buckets.items()):
+        # DNS for this τ = largest N in this τ-bucket
+        dns = max(bucket, key=lambda rr: rr["Nx"])
+        L_box = dns["L_box"]; Nx_ref, Ny_ref = dns["Nx"], dns["Ny"]
+
+        # spectral-resample every run’s snapshots to this τ-DNS grid
+        for rr in bucket:
+            rr["ux_list_ref"], rr["uy_list_ref"] = [], []
+            for ux, uy in zip(rr["ux_list_native"], rr["uy_list_native"]):
+                ux_r, uy_r = spectral_resample_to_ref(
+                    ux, uy, Nx_src=rr["Nx"], Ny_src=rr["Ny"], Nx_ref=Nx_ref, Ny_ref=Ny_ref
+                )
+                rr["ux_list_ref"].append(ux_r); rr["uy_list_ref"].append(uy_r)
+
+        # bandlimit at smallest Nyquist within this τ-bucket
+        N_min = min(rr["Nx"] for rr in bucket)
+        k_cut = np.pi * N_min / L_box
+        print(f"[{group_name}] τ={tau:.4f}: N_min={N_min}, k_cut={k_cut:.6f}")
+
+        # cache low-passed DNS snapshots for this τ
+        dns_lp_cache = {}
+        for i, t in enumerate(dns["times"]):
+            ux_a, uy_a = dns["ux_list_ref"][i], dns["uy_list_ref"][i]
+            dns_lp_cache[int(t)] = fft_lowpass(ux_a, uy_a, k_cut, L_box)
+
+        # compute errors vs this τ-DNS
+        items = []
+        for rr in sorted(bucket, key=lambda x: x["Nx"]):
+            common = np.intersect1d(rr["times"], dns["times"])
+            if common.size == 0:
+                print(f"[{group_name}] τ={tau:.4f}: no common times with {os.path.basename(dns['path'])} for {os.path.basename(rr['path'])}")
+                continue
+            idx_r = {int(tt): i for i, tt in enumerate(rr["times"])}
+            errs = []
+            for tt in common:
+                ir = idx_r[int(tt)]
+                ux_c, uy_c = fft_lowpass(rr["ux_list_ref"][ir], rr["uy_list_ref"][ir], k_cut, L_box)
+                ux_a, uy_a = dns_lp_cache[int(tt)]
+                diff_L2 = np.sqrt(np.sum((ux_c - ux_a)**2 + (uy_c - uy_a)**2))
+                ref_L2  = np.sqrt(np.sum(ux_a**2 + uy_a**2))
+                if ref_L2 > 0:
+                    errs.append(diff_L2 / ref_L2)
+            if not errs:
+                continue
+            rel_L2_RMS = float(np.sqrt(np.mean(np.square(errs))))
+            items.append((rr["Nx"], rel_L2_RMS, rr["Re0"], os.path.basename(rr["path"]), rr is dns))
+
+        if not items:
+            print(f"[{group_name}] τ={tau:.4f}: nothing to plot"); 
             continue
 
-        rel_L2_RMS = float(np.sqrt(np.mean(np.square(errs))))
-        tau_key = float(r["tau"])
-        curves.setdefault(tau_key, []).append(
-            (r["Nx"], rel_L2_RMS, r["Re0"], os.path.basename(r["path"]))
-        )
-
-    if not curves:
-        print(f"[{group_name}] No comparable runs; nothing to plot.")
-        return
-
-    # --- plot this group's curve(s) ---
-    plt.figure(figsize=(6,4))
-    for tau in sorted(curves.keys()):
-        items = sorted(curves[tau], key=lambda x: x[0])
         Ns   = [it[0] for it in items]
         Errs = [it[1] for it in items]
         Re0s = [it[2] for it in items]
-        label = f"Re≈{Re0s[0]:.0f} (τ={tau:.4f})"
-        plt.plot(Ns, Errs, marker="o", lw=2, label=label)
+        ymax_all = max(ymax_all, max(Errs) if Errs else 0.0)
 
-        print(f"\n[{group_name}] τ={tau:.4f}  Re≈{Re0s[0]:.0f}")
-        for (N, e, Re0, name) in items:
-            tag = " (DNS)" if N == Nx_ref else ""
+        # plot τ curve
+        if do_plot:
+            plt.plot(Ns, Errs, marker="o", lw=2, label=f"τ={tau:.4f} (Re≈{Re0s[-1]:.0f})")
+
+        # console print with correct DNS tag by file identity
+        print(f"\n[{group_name}] τ={tau:.4f}")
+        for (N, e, Re0, name, is_dns) in items:
+            tag = " (DNS)" if is_dns else ""
             print(f"  N={N:4d}  RelErr={e:.6e}  {name}{tag}")
 
-    plt.xlabel("Grid size N")
-    plt.ylabel("Relative error in velocity U")
-    plt.title(f"{group_name}: Convergence vs resolution (k ≤ k_nyq(Nmin={N_min}))")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    # finalize plot
+    if do_plot:
+        plt.xlabel("Grid size N")
+        plt.ylabel("Relative error in velocity U")
+        plt.title(f"{group_name}: Grid convergence of the cascade LBM for the U-velocity component")
+        plt.grid(True, alpha=0.3)
+        if y_limits is not None:
+            plt.ylim(*y_limits)
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    return ymax_all
+
 
 def main(pattern="lbm_run_N*.npz"):
     MAX_T = 400   # compare up to this time step (t=0..MAX_T)
@@ -250,9 +267,17 @@ def main(pattern="lbm_run_N*.npz"):
     runs_bgk = [r for r in runs_all if "MRT" not in r["path"]]
     runs_mrt = [r for r in runs_all if "MRT"     in r["path"]]
 
-    # Two separate analyses/plots
-    analyze_group(runs_bgk, "BGK")
-    analyze_group(runs_mrt, "MRT")
+    # First pass: compute maxima without plotting
+    ymax_bgk = analyze_group(runs_bgk, "BGK", do_plot=False)
+    ymax_mrt = analyze_group(runs_mrt, "MRT", do_plot=False)
+
+    # Common y-limits
+    common_ylim = (-0.1, 1.05 * max(ymax_bgk, ymax_mrt, 1e-12))
+
+    # Second pass: plot both with identical y-scale
+    analyze_group(runs_bgk, "BGK", y_limits=common_ylim, do_plot=True)
+    analyze_group(runs_mrt, "MRT", y_limits=common_ylim, do_plot=True)
+
 
 if __name__ == "__main__":
     main()

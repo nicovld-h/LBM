@@ -4,6 +4,7 @@ import glob, os
 
 L_BOX_DEFAULT = 2*np.pi
 URMS0_DEFAULT = 0.05   # initial urms used in the solver
+# compare up to this time step (t=MAX_T)
 
 plt.rcParams.update({
     "axes.titlesize": 18,   # subplot titles
@@ -166,6 +167,12 @@ def analyze_group(runs_group, group_name, y_limits=None, do_plot=True):
     ymax_all = 0.0
     if do_plot:
         plt.figure(figsize=(6,4))
+        ax = plt.gca()
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.minorticks_on()
+        ax.grid(True, which='both', linestyle=':', linewidth=1, alpha=0.35)
+
 
     for tau, bucket in sorted(buckets.items()):
         # DNS for this τ = largest N in this τ-bucket
@@ -217,6 +224,8 @@ def analyze_group(runs_group, group_name, y_limits=None, do_plot=True):
         if not items:
             print(f"[{group_name}] τ={tau:.4f}: nothing to plot"); 
             continue
+        
+        items = [it for it in items if it[0] != 512] # exclude 512 for plotting
 
         Ns   = [it[0] for it in items]
         Errs = [it[1] for it in items]
@@ -225,7 +234,12 @@ def analyze_group(runs_group, group_name, y_limits=None, do_plot=True):
 
         # plot τ curve
         if do_plot:
-            plt.plot(Ns, Errs, marker="o", lw=2, label=f"τ={tau:.4f} (Re≈{Re0s[-1]:.0f})")
+            Ns_plot   = [n for n,e in zip(Ns, Errs) if e > 0.0]   # drop DNS ~0
+            Errs_plot = [e for e     in Errs        if e > 0.0]
+            if Ns_plot:
+                plt.plot(Ns_plot, Errs_plot, marker="o", lw=2,
+                        label=f"τ={tau:.4f} (Re≈{Re0s[-1]:.0f})")
+
 
         # console print with correct DNS tag by file identity
         print(f"\n[{group_name}] τ={tau:.4f}")
@@ -238,9 +252,10 @@ def analyze_group(runs_group, group_name, y_limits=None, do_plot=True):
         plt.xlabel("Grid size N")
         plt.ylabel("Relative error in velocity U")
         plt.title(f"{group_name}: Grid convergence of the cascade LBM for the U-velocity component")
-        plt.grid(True, alpha=0.3)
         if y_limits is not None:
-            plt.ylim(*y_limits)
+             y0, y1 = y_limits
+             y0 = max(y0, 1e-12)   # log-scale needs >0
+             plt.ylim(y0, y1)
         plt.legend()
         plt.tight_layout()
         plt.show()
@@ -249,7 +264,7 @@ def analyze_group(runs_group, group_name, y_limits=None, do_plot=True):
 
 
 def main(pattern="lbm_run_N*.npz"):
-    MAX_T = 400   # compare up to this time step (t=0..MAX_T)
+    MAX_T = 125   # compare up to this time step (t=0..MAX_T)
 
     files = sorted(glob.glob(pattern))
     files += sorted(glob.glob("lbm_runMRT_N*.npz"))  # add MRT files
@@ -272,7 +287,7 @@ def main(pattern="lbm_run_N*.npz"):
     ymax_mrt = analyze_group(runs_mrt, "MRT", do_plot=False)
 
     # Common y-limits
-    common_ylim = (-0.1, 1.05 * max(ymax_bgk, ymax_mrt, 1e-12))
+    common_ylim = (1e-1, 1.05 * max(ymax_bgk, ymax_mrt, 1e-12))
 
     # Second pass: plot both with identical y-scale
     analyze_group(runs_bgk, "BGK", y_limits=common_ylim, do_plot=True)
